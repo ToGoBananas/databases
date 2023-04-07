@@ -314,7 +314,7 @@ class Connection:
 
         return query
 
-
+from databases.interfaces import TransactionBackend
 class Transaction:
     def __init__(
         self,
@@ -325,6 +325,7 @@ class Transaction:
         self._connection_callable = connection_callable
         self._force_rollback = force_rollback
         self._extra_options = kwargs
+        self._transaction_context = ContextVar('transaction_context')
 
     async def __aenter__(self) -> "Transaction":
         """
@@ -347,6 +348,8 @@ class Transaction:
         else:
             await self.commit()
 
+        self._transaction_context.set(None)
+
     def __await__(self) -> typing.Generator:
         """
         Called if using the low-level `transaction = await database.transaction()`
@@ -366,12 +369,16 @@ class Transaction:
         return wrapper
 
     async def start(self) -> "Transaction":
-        self._transaction = self._connection_callable()._connection.transaction()
-
+        try:
+            self._transaction_context.get()
+        except LookupError:
+            _transaction = self._connection_callable()._connection.transaction()
+            self._transaction_context.set(_transaction)
+        
         async with self._connection_callable()._transaction_lock:
             is_root = not self._connection_callable()._transaction_stack
             await self._connection_callable().__aenter__()
-            await self._transaction.start(
+            await self._transaction_context.get().start(
                 is_root=is_root, extra_options=self._extra_options
             )
             self._connection_callable()._transaction_stack.append(self)
@@ -381,14 +388,14 @@ class Transaction:
         async with self._connection_callable()._transaction_lock:
             assert self._connection_callable()._transaction_stack[-1] is self
             self._connection_callable()._transaction_stack.pop()
-            await self._transaction.commit()
+            await self._transaction_context.get().commit()
             await self._connection_callable().__aexit__()
 
     async def rollback(self) -> None:
         async with self._connection_callable()._transaction_lock:
             assert self._connection_callable()._transaction_stack[-1] is self
             self._connection_callable()._transaction_stack.pop()
-            await self._transaction.rollback()
+            await self._transaction_context.get().rollback()
             await self._connection_callable().__aexit__()
 
 
